@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Calculadora de subredes (hijos)</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; padding: 18px; color:#111 }
+  label { display:block; margin-top:10px }
+  input[type=text], input[type=number], select { padding:6px; font-size:14px; width:100%; box-sizing:border-box; margin-top:6px }
+  button { margin-top:12px; padding:8px 12px; font-size:15px; cursor:pointer }
+  table { width:100%; border-collapse:collapse; margin-top:12px }
+  th, td { border:1px solid #ddd; padding:8px; text-align:left; font-size:13px }
+  th { background:#f3f3f3 }
+  .small { font-size:13px; color:#555 }
+  pre { background:#f7f7f7; padding:12px; overflow:auto }
+  .error { color:#9b0000; font-weight:600 }
+  .row { display:flex; gap:10px }
+  .col { flex:1 }
+  @media (max-width:640px){ .row{ flex-direction:column } }
+</style>
+</head>
+<body>
+<h1>Calculadora de subredes (hijos)</h1>
+<p class="small">Introduce la red base y el prefijo (ej. <code>192.168.0.0</code> y <code>/24</code>), número de subredes y hosts por subred.</p>
+
+<label>Red base (IP): <input id="baseIp" type="text" value="192.168.0.0"></label>
+<div class="row">
+  <div class="col">
+    <label>Prefijo base (CIDR): <input id="basePrefix" type="number" min="0" max="32" value="24"></label>
+  </div>
+  <div class="col">
+    <label>Nº de subredes: <input id="numSubnets" type="number" min="1" value="4"></label>
+  </div>
+</div>
+<div class="row">
+  <div class="col">
+    <label>Hosts requeridos por subred (útiles): <input id="hostsPerSubnet" type="number" min="1" value="25"></label>
+  </div>
+  <div class="col">
+    <label>
+      Considerar hosts +2 (network & broadcast): 
+      <select id="includeNetworkBroadcast"><option value="1" selected>Sí (usar hosts + 2)</option><option value="0">No (solo hosts útiles)</option></select>
+    </label>
+  </div>
+</div>
+
+<button id="calcBtn">Calcular</button>
+<button id="copyBtn" style="display:none">Copiar resultado</button>
+
+<div id="output"></div>
+
+<script>
+/* Utilidades IP */
+function ipToInt(ip){
+  const parts = ip.trim().split('.');
+  if(parts.length !== 4) throw new Error('IP inválida');
+  let n = 0;
+  for(let i=0;i<4;i++){
+    const p = Number(parts[i]);
+    if(Number.isNaN(p) || p<0 || p>255) throw new Error('IP inválida');
+    n = (n<<8) + p;
+  }
+  return n >>> 0;
+}
+function intToIp(int){
+  return [(int>>>24)&0xFF, (int>>>16)&0xFF, (int>>>8)&0xFF, int&0xFF].join('.');
+}
+function maskFromPrefix(p){
+  if(p<0||p>32) throw new Error('Prefijo inválido');
+  return p===0?0: (0xFFFFFFFF << (32-p)) >>> 0;
+}
+function prefixFromMask(maskInt){
+  // cuenta bits a 1
+  let c=0; for(let i=31;i>=0;i--) if(((maskInt>>>i)&1)===1) c++; else break;
+  return c;
+}
+function nextPow2(v){
+  if(v<=1) return 1;
+  v = Math.ceil(v);
+  let p = 1;
+  while(p < v) p <<= 1;
+  return p;
+}
+
+document.getElementById('calcBtn').addEventListener('click', ()=> {
+  const baseIp = document.getElementById('baseIp').value.trim();
+  const basePrefix = Number(document.getElementById('basePrefix').value);
+  const numSubnets = Number(document.getElementById('numSubnets').value);
+  const hostsPerSubnet = Number(document.getElementById('hostsPerSubnet').value);
+  const includeNB = document.getElementById('includeNetworkBroadcast').value === '1';
+  const out = document.getElementById('output');
+  out.innerHTML = '';
+  try {
+    if(!Number.isFinite(basePrefix) || basePrefix<0 || basePrefix>32) throw new Error('Prefijo base inválido');
+    if(!Number.isFinite(numSubnets) || numSubnets<1) throw new Error('Número de subredes inválido');
+    if(!Number.isFinite(hostsPerSubnet) || hostsPerSubnet<1) throw new Error('Hosts por subred inválido');
+
+    const baseInt = ipToInt(baseIp);
+    const baseMask = maskFromPrefix(basePrefix);
+    const baseNetworkInt = baseInt & baseMask;
+    const availableAddresses = Math.pow(2, 32 - basePrefix);
+
+    // hosts necesarios por subred = hosts útiles + 2 (network & broadcast) si includeNB true
+    const needed = includeNB ? (hostsPerSubnet + 2) : hostsPerSubnet;
+    const blockSize = nextPow2(needed);
+    const hostBits = Math.log2(blockSize);
+    const subnetPrefix = 32 - hostBits;
+
+    const totalNeeded = blockSize * numSubnets;
+    if(totalNeeded > availableAddresses){
+      out.innerHTML = `<p class="error">ERROR: la red base ${intToIp(baseNetworkInt)}/${basePrefix} tiene ${availableAddresses} direcciones, pero necesitas ${totalNeeded}. Usa una red base más grande (prefijo menor) o reduce subredes/hosts.</p>`;
+      return;
+    }
+
+    // Generar tabla
+    let html = '';
+    html += `<p class="small">Red base detectada: <strong>${intToIp(baseNetworkInt)}/${basePrefix}</strong> · Direcciones disponibles: <strong>${availableAddresses}</strong></p>`;
+    html += `<p class="small">Cada subred necesitará un bloque de <strong>${blockSize}</strong> direcciones → prefijo <strong>/${subnetPrefix}</strong> (hosts útiles ≈ ${blockSize - (includeNB?2:0)})</p>`;
+
+    html += `<table><thead><tr>
+      <th>#</th><th>Red</th><th>Prefijo</th><th>Mascara</th><th>Rango útil</th><th>Broadcast</th><th>Total direcciones</th>
+    </tr></thead><tbody>`;
+
+    let cur = baseNetworkInt >>> 0;
+    for(let i=0;i<numSubnets;i++){
+      const net = (cur + i*blockSize) >>> 0;
+      const bcast = (net + blockSize - 1) >>> 0;
+      const firstUsable = (blockSize >= 4) ? (net + 1) >>> 0 : net; // /31 y /32 corner cases
+      const lastUsable = (blockSize >= 4) ? (bcast - 1) >>> 0 : bcast;
+      const maskStr = intToIp(maskFromPrefix(subnetPrefix));
+      html += `<tr>
+        <td>${i+1}</td>
+        <td>${intToIp(net)}</td>
+        <td>/${subnetPrefix}</td>
+        <td>${maskStr}</td>
+        <td>${intToIp(firstUsable)} - ${intToIp(lastUsable)}</td>
+        <td>${intToIp(bcast)}</td>
+        <td>${blockSize}</td>
+      </tr>`;
+      // cur += blockSize; // usamos net = base + i*blockSize
+    }
+    html += `</tbody></table>`;
+
+    // Razonamiento paso a paso
+    let reasoning = '';
+    reasoning += `Cálculo paso a paso:\n`;
+    reasoning += `1) Red base: ${intToIp(baseNetworkInt)}/${basePrefix} → ${availableAddresses} direcciones totales.\n`;
+    reasoning += `2) Hosts solicitados (útiles) por subred: ${hostsPerSubnet}.\n`;
+    reasoning += `3) Considerando network+broadcast: ${includeNB ? 'Sí' : 'No'} → direcciones necesarias por subred = ${needed}.\n`;
+    reasoning += `4) Se toma la potencia de 2 mínima >= ${needed}: ${blockSize} direcciones (bits de host = ${hostBits}).\n`;
+    reasoning += `5) Prefijo resultante por subred: /${subnetPrefix} (máscara ${intToIp(maskFromPrefix(subnetPrefix))}).\n`;
+    reasoning += `6) Direcciones totales necesarias = ${blockSize} * ${numSubnets} = ${totalNeeded}.\n`;
+    reasoning += totalNeeded <= availableAddresses ? `7) Cabe en la red base (sí: ${availableAddresses} disponibles).\n` : `7) NO cabe en la red base (${availableAddresses} disponibles) — cambia parámetros.\n`;
+
+    html += `<h3>Razonamiento (listo para copiar)</h3><pre id="reasoning">${reasoning}</pre>`;
+
+    out.innerHTML = html;
+    document.getElementById('copyBtn').style.display = 'inline-block';
+    document.getElementById('copyBtn').onclick = () => {
+      const text = out.innerText;
+      navigator.clipboard.writeText(text).then(()=> {
+        alert('Resultado copiado al portapapeles. Puedes pegarlo en tu clase o documento.');
+      }).catch(()=> alert('No se pudo copiar automáticamente. Selecciona y copia manualmente.'));
+    };
+
+  } catch(err){
+    out.innerHTML = `<p class="error">Error: ${err.message}</p>`;
+  }
+});
+</script>
+</body>
+</html>
